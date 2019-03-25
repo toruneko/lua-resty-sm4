@@ -1,0 +1,178 @@
+-- Copyright (C) by Jianhao Dai (Toruneko)
+
+local bit = require "bit"
+local ffi = require "ffi"
+local bor = bit.bor
+local band = bit.band
+local bxor = bit.bxor
+local bnot = bit.bnot
+local lshift = bit.lshift
+local rshift = bit.rshift
+local tohex = bit.tohex
+local ffi_new = ffi.new
+local ffi_cast = ffi.cast
+local tab_concat = table.concat
+local setmetatable = setmetatable
+
+local _M = { _VERSION = '0.0.1' }
+local mt = { __index = _M }
+
+local ok, new_tab = pcall(require, "table.new")
+if not ok then
+    new_tab = function(narr, nrec) return {} end
+end
+
+local function uint32(b, n)
+    return bor(lshift(b[n], 24), lshift(b[n + 1], 16), lshift(b[n + 2], 8), b[n + 3])
+end
+
+local function byte4(u32, dst, n)
+    dst[n] = band(rshift(u32, 24), 0xFF)
+    dst[n + 1] = band(rshift(u32, 16), 0xFF)
+    dst[n + 2] = band(rshift(u32, 8), 0xFF)
+    dst[n + 3] = band(u32, 0xFF)
+end
+
+-- S(x,n): 32比特循环左移n比特运算
+local function S(x, n)
+    return bor(lshift(x, n), rshift(x, 32 - n))
+end
+
+-- 系统参数 FK
+local FK = ffi.new("uint32_t[4]", { 0xA3B1BAC6, 0x56AA3350, 0x677D9197, 0xB27022DC })
+
+-- 固定参数 CK
+local CK = ffi.new("uint32_t[32]", {
+    0x00070E15, 0x1C232A31, 0x383F464D, 0x545B6269,
+    0x70777E85, 0x8C939AA1, 0xA8AFB6BD, 0xC4CBD2D9,
+    0xE0E7EEF5, 0xFC030A11, 0x181F262D, 0x343B4249,
+    0x50575E65, 0x6C737A81, 0x888F969D, 0xA4ABB2B9,
+    0xC0C7CED5, 0xDCE3EAF1, 0xF8FF060D, 0x141B2229,
+    0x30373E45, 0x4C535A61, 0x686F767D, 0x848B9299,
+    0xA0A7AEB5, 0xBCC3CAD1, 0xD8DFE6ED, 0xF4FB0209,
+    0x10171E25, 0x2C333A41, 0x484F565D, 0x646B7279,
+})
+
+-- Sbox
+local Sbox = ffi.new("uint32_t[256]", {
+    0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
+    0x2b, 0x67, 0x9a, 0x76, 0x2a, 0xbe, 0x04, 0xc3, 0xaa, 0x44, 0x13, 0x26, 0x49, 0x86, 0x06, 0x99,
+    0x9c, 0x42, 0x50, 0xf4, 0x91, 0xef, 0x98, 0x7a, 0x33, 0x54, 0x0b, 0x43, 0xed, 0xcf, 0xac, 0x62,
+    0xe4, 0xb3, 0x1c, 0xa9, 0xc9, 0x08, 0xe8, 0x95, 0x80, 0xdf, 0x94, 0xfa, 0x75, 0x8f, 0x3f, 0xa6,
+    0x47, 0x07, 0xa7, 0xfc, 0xf3, 0x73, 0x17, 0xba, 0x83, 0x59, 0x3c, 0x19, 0xe6, 0x85, 0x4f, 0xa8,
+    0x68, 0x6b, 0x81, 0xb2, 0x71, 0x64, 0xda, 0x8b, 0xf8, 0xeb, 0x0f, 0x4b, 0x70, 0x56, 0x9d, 0x35,
+    0x1e, 0x24, 0x0e, 0x5e, 0x63, 0x58, 0xd1, 0xa2, 0x25, 0x22, 0x7c, 0x3b, 0x01, 0x21, 0x78, 0x87,
+    0xd4, 0x00, 0x46, 0x57, 0x9f, 0xd3, 0x27, 0x52, 0x4c, 0x36, 0x02, 0xe7, 0xa0, 0xc4, 0xc8, 0x9e,
+    0xea, 0xbf, 0x8a, 0xd2, 0x40, 0xc7, 0x38, 0xb5, 0xa3, 0xf7, 0xf2, 0xce, 0xf9, 0x61, 0x15, 0xa1,
+    0xe0, 0xae, 0x5d, 0xa4, 0x9b, 0x34, 0x1a, 0x55, 0xad, 0x93, 0x32, 0x30, 0xf5, 0x8c, 0xb1, 0xe3,
+    0x1d, 0xf6, 0xe2, 0x2e, 0x82, 0x66, 0xca, 0x60, 0xc0, 0x29, 0x23, 0xab, 0x0d, 0x53, 0x4e, 0x6f,
+    0xd5, 0xdb, 0x37, 0x45, 0xde, 0xfd, 0x8e, 0x2f, 0x03, 0xff, 0x6a, 0x72, 0x6d, 0x6c, 0x5b, 0x51,
+    0x8d, 0x1b, 0xaf, 0x92, 0xbb, 0xdd, 0xbc, 0x7f, 0x11, 0xd9, 0x5c, 0x41, 0x1f, 0x10, 0x5a, 0xd8,
+    0x0a, 0xc1, 0x31, 0x88, 0xa5, 0xcd, 0x7b, 0xbd, 0x2d, 0x74, 0xd0, 0x12, 0xb8, 0xe5, 0xb4, 0xb0,
+    0x89, 0x69, 0x97, 0x4a, 0x0c, 0x96, 0x77, 0x7e, 0x65, 0xb9, 0xf1, 0x09, 0xc5, 0x6e, 0xc6, 0x84,
+    0x18, 0xf0, 0x7d, 0xec, 0x3a, 0xdc, 0x4d, 0x20, 0x79, 0xee, 0x5f, 0x3e, 0xd7, 0xcb, 0x39, 0x48,
+})
+
+-- 非线性变换τ
+local function P(a)
+    return bxor(lshift(Sbox[rshift(a, 24)], 24),
+        lshift(Sbox[band(rshift(a, 16), 0xFF)], 16),
+        lshift(Sbox[band(rshift(a, 8), 0xFF)], 8),
+        Sbox[band(a, 0xFF)])
+end
+
+-- 线性变换 𝐿
+local function L(b)
+    return bxor(b, S(b, 2), S(b, 10), S(b, 18), S(b, 24))
+end
+
+-- 合成置换 T
+local function T(a)
+    return L(P(a))
+end
+
+-- 轮函数 F
+local function F(x0, x1, x2, x3, rk)
+    return bxor(x0, T(bxor(x1, x2, x3, rk)))
+end
+
+-- 线性变换 𝐿′
+local function L1(b)
+    return bxor(b, S(b, 13), S(b, 23))
+end
+
+-- 密钥扩展算法 T′
+local function T1(a)
+    return L1(P(a))
+end
+
+-- 密钥扩展算法 F′
+local function F1(x0, x1, x2, x3, rk)
+    return bxor(x0, T1(bxor(x1, x2, x3, rk)))
+end
+
+local function SM4_Init(ctx, key)
+    local K = ffi_new("uint32_t[4]")
+    K[0] = bxor(uint32(key, 0 + 1), FK[0])
+    K[1] = bxor(uint32(key, 4 + 1), FK[1])
+    K[2] = bxor(uint32(key, 8 + 1), FK[2])
+    K[3] = bxor(uint32(key, 12 + 1), FK[3])
+
+    local rk = ffi_new("uint32_t[32]")
+    for i = 0, 8 - 1, 1 do
+        local j = 4 * i
+        K[0] = F1(K[0], K[1], K[2], K[3], CK[j])
+        K[1] = F1(K[1], K[2], K[3], K[0], CK[j + 1])
+        K[2] = F1(K[2], K[3], K[0], K[1], CK[j + 2])
+        K[3] = F1(K[3], K[0], K[1], K[2], CK[j + 3])
+
+        rk[j], rk[j + 1], rk[j + 2], rk[j + 3] = K[0], K[1], K[2], K[3]
+    end
+
+    ctx.rk = rk
+end
+
+local function SM4_Update_block(ctx, block, enc)
+    local X = ffi_new("uint32_t[4]")
+    X[0] = uint32(block, 0 + 1)
+    X[1] = uint32(block, 4 + 1)
+    X[2] = uint32(block, 8 + 1)
+    X[3] = uint32(block, 12 + 1)
+
+    for i = 0, 8 - 1, 1 do
+        local j = 4 * i
+        X[0] = F(X[0], X[1], X[2], X[3], ctx.rk[enc and j + 0 or 31 - j])
+        X[1] = F(X[1], X[2], X[3], X[0], ctx.rk[enc and j + 1 or 30 - j])
+        X[2] = F(X[2], X[3], X[0], X[1], ctx.rk[enc and j + 2 or 29 - j])
+        X[3] = F(X[3], X[0], X[1], X[2], ctx.rk[enc and j + 3 or 28 - j])
+    end
+    X[0], X[1], X[2], X[3] = X[3], X[2], X[1], X[0]
+
+    local dst = new_tab(0, 16)
+    byte4(X[0], dst, 0 + 1)
+    byte4(X[1], dst, 4 + 1)
+    byte4(X[2], dst, 8 + 1)
+    byte4(X[3], dst, 12 + 1)
+    return dst
+end
+
+local function SM4_Encrypt(ctx, data, len)
+
+end
+
+function _M.new(self, key)
+    local ctx = new_tab(0, 1)
+    SM4_Init(ctx, key)
+
+    return setmetatable({ _ctx = ctx }, mt)
+end
+
+function _M.encrypt_block(self, s)
+    return SM4_Update_block(self._ctx, s, true)
+end
+
+function _M.decrypt_block(self, s)
+    return SM4_Update_block(self._ctx, s, false)
+end
+
+return _M
