@@ -53,7 +53,7 @@ cipher
 ------
 `syntax: ciph = sm4.cipher(_cipher)`
 
-creates a evp cipher data for `lua-resty-string` module.
+creates a evp cipher object for `lua-resty-string` module.
 
 ```lua
 local resty_sm4 = require "resty.sm4"
