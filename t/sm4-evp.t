@@ -26,10 +26,7 @@ __DATA__
             local resty_aes = require "resty.aes"
             local resty_sm4 = require "resty.sm4"
             local cipher = resty_sm4.cipher()
-            local sm4, err = resty_aes:new("1234567890123456", nil, cipher, {
-                iv = "1234567890123456",
-                method = nil
-            })
+            local sm4, err = resty_aes:new("secret", nil, cipher)
             if err then
                 ngx.log(ngx.ERR, err)
                 return

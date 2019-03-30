@@ -27,13 +27,10 @@ Synopsis
         location = /t {
             content_by_lua_block {
                 local resty_sm4 = require "resty.sm4"
-                local sm4 = resty_sm4:new()
-                sm4:update("abc")
-                ngx.say(sm4:final())
+                local sm4 = resty_sm4:new({0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10})
+                local enc_data = sm4:encrypt({0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10})
 
-                sm4:reset()
-                sm4:update("abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd")
-                ngx.say(sm4:final())
+                local dec_data = sm4:decrypt({0x68, 0x1e, 0xdf, 0x34, 0xd2, 0x06, 0x96, 0x5e, 0x86, 0xb3, 0xe9, 0x4f, 0x53, 0x6e, 0x42, 0x46})
             }
         }
     }
@@ -52,9 +49,26 @@ To load this library,
     local sm4 = require "resty.sm4"
 ```
 
+cipher
+------
+`syntax: ciph = sm4.cipher(_cipher)`
+
+creates a evp cipher data for `lua-resty-string` module.
+
+```lua
+local resty_sm4 = require "resty.sm4"
+local resty_aes = require "resty.aes"
+local str = require "resty.string"
+local ciph = resty_sm4.cipher()
+local sm4, err = resty_aes:new("secret", nil, ciph)
+local enc_data = sm4:encrypt("abc")
+ngx.say(str.to_hex(enc_data))
+
+```
+
 new
 ---
-`syntax: obj = sm4:new()`
+`syntax: obj = sm4.new()`
 
 Creates a new sm4 object instance
 
@@ -65,17 +79,13 @@ local resty_sm4 = require "resty.sm4"
 local sm4 = resty_sm4:new()
 ```
 
-update
+encrypt
 ----
-`syntax: ok = sm4:update(str)`
+`syntax: enc_data = sm4:encrypt(block)`
 
-final
+decrypt
 ------
-`syntax: hash = sm4:final()`
-
-reset
-------
-`syntax: sm4:reset()`
+`syntax: dec_data = sm4:decrypt(block)`
 
 
 Author
