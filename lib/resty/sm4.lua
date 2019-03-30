@@ -5,32 +5,96 @@ local ffi = require "ffi"
 local bor = bit.bor
 local band = bit.band
 local bxor = bit.bxor
-local bnot = bit.bnot
 local lshift = bit.lshift
 local rshift = bit.rshift
-local tohex = bit.tohex
 local ffi_new = ffi.new
 local ffi_cast = ffi.cast
-local tab_concat = table.concat
+local ffi_str = ffi.string
+local ffi_copy = ffi.copy
+local ffi_null = ffi.null
+local C = ffi.C
+local tonumber = tonumber
 local setmetatable = setmetatable
 
 local _M = { _VERSION = '0.0.1' }
 local mt = { __index = _M }
 
-local ok, new_tab = pcall(require, "table.new")
-if not ok then
-    new_tab = function(narr, nrec) return {} end
+local EVP_CIPHER_CTX_FLAG_WRAP_ALLOW = 0x1
+local EVP_CIPH_WRAP_MODE = 0x10002
+local EVP_CIPH_CUSTOM_IV = 0x10
+local EVP_CIPH_FLAG_CUSTOM_CIPHER = 0x100000
+local EVP_CIPH_ALWAYS_CALL_INIT = 0x20
+local EVP_CIPH_CTRL_INIT = 0x40
+local EVP_CIPH_FLAG_DEFAULT_ASN1 = 0x1000
+local SMS4_WRAP_FLAGS = bor(EVP_CIPH_WRAP_MODE, EVP_CIPH_CTRL_INIT,
+    EVP_CIPH_CUSTOM_IV, EVP_CIPH_FLAG_CUSTOM_CIPHER,
+    EVP_CIPH_ALWAYS_CALL_INIT, EVP_CIPH_FLAG_DEFAULT_ASN1)
+
+ffi.cdef [[
+typedef struct asn1_type_st ASN1_TYPE;
+typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
+typedef struct evp_cipher_st {
+    int nid;
+    int block_size;
+    int key_len;
+    int iv_len;
+    unsigned long flags;
+    int (*init) (EVP_CIPHER_CTX *ctx, const unsigned char *key,
+                 const unsigned char *iv, int enc);
+    int (*do_cipher) (EVP_CIPHER_CTX *ctx, unsigned char *out,
+                      const unsigned char *in, size_t inl);
+    int (*cleanup) (EVP_CIPHER_CTX *);
+    int ctx_size;
+    int (*set_asn1_parameters) (EVP_CIPHER_CTX *, ASN1_TYPE *);
+    int (*get_asn1_parameters) (EVP_CIPHER_CTX *, ASN1_TYPE *);
+    int (*ctrl) (EVP_CIPHER_CTX *, int type, int arg, void *ptr);
+    void *app_data;
+} EVP_CIPHER;
+
+typedef struct {
+	uint32_t rk[32];
+} sms4_key_t;
+
+typedef struct {
+    union {
+        double align;
+        sms4_key_t ks;
+    } ks;
+    /* Indicates if IV has been set */
+    unsigned char *iv;
+} EVP_SMS4_WRAP_CTX;
+
+typedef void (*block128_f) (const unsigned char in[16],
+                            unsigned char out[16], const void *key);
+
+void EVP_CIPHER_CTX_set_flags(EVP_CIPHER_CTX *ctx, int flags);
+void *EVP_CIPHER_CTX_get_cipher_data(const EVP_CIPHER_CTX *ctx);
+int EVP_CIPHER_CTX_encrypting(const EVP_CIPHER_CTX *ctx);
+unsigned char *EVP_CIPHER_CTX_iv_noconst(EVP_CIPHER_CTX *ctx);
+int EVP_CIPHER_CTX_iv_length(const EVP_CIPHER_CTX *ctx);
+size_t CRYPTO_128_wrap_pad(void *key, const unsigned char *icv,
+                           unsigned char *out, const unsigned char *in,
+                           size_t inlen, block128_f block);
+size_t CRYPTO_128_unwrap_pad(void *key, const unsigned char *icv,
+                             unsigned char *out, const unsigned char *in,
+                             size_t inlen, block128_f block);
+size_t CRYPTO_128_wrap(void *key, const unsigned char *icv,
+                       unsigned char *out, const unsigned char *in,
+                       size_t inlen, block128_f block);
+size_t CRYPTO_128_unwrap(void *key, const unsigned char *icv,
+                         unsigned char *out, const unsigned char *in,
+                         size_t inlen, block128_f block);
+]]
+
+local function get32(pc, n)
+    return bor(lshift(pc[n], 24), lshift(pc[n + 1], 16), lshift(pc[n + 2], 8), pc[n + 3])
 end
 
-local function uint32(b, n)
-    return bor(lshift(b[n], 24), lshift(b[n + 1], 16), lshift(b[n + 2], 8), b[n + 3])
-end
-
-local function byte4(u32, dst, n)
-    dst[n] = band(rshift(u32, 24), 0xFF)
-    dst[n + 1] = band(rshift(u32, 16), 0xFF)
-    dst[n + 2] = band(rshift(u32, 8), 0xFF)
-    dst[n + 3] = band(u32, 0xFF)
+local function put32(st, ct, n)
+    ct[n] = band(rshift(st, 24), 0xFF)
+    ct[n + 1] = band(rshift(st, 16), 0xFF)
+    ct[n + 2] = band(rshift(st, 8), 0xFF)
+    ct[n + 3] = band(st, 0xFF)
 end
 
 -- S(x,n): 32比特循环左移n比特运算
@@ -111,12 +175,12 @@ local function F1(x0, x1, x2, x3, rk)
     return bxor(x0, T1(bxor(x1, x2, x3, rk)))
 end
 
-local function SM4_Init(ctx, key)
+local function SMS4_Init(key)
     local K = ffi_new("uint32_t[4]")
-    K[0] = bxor(uint32(key, 0 + 1), FK[0])
-    K[1] = bxor(uint32(key, 4 + 1), FK[1])
-    K[2] = bxor(uint32(key, 8 + 1), FK[2])
-    K[3] = bxor(uint32(key, 12 + 1), FK[3])
+    K[0] = bxor(get32(key, 0), FK[0])
+    K[1] = bxor(get32(key, 4), FK[1])
+    K[2] = bxor(get32(key, 8), FK[2])
+    K[3] = bxor(get32(key, 12), FK[3])
 
     local rk = ffi_new("uint32_t[32]")
     for i = 0, 8 - 1, 1 do
@@ -129,50 +193,169 @@ local function SM4_Init(ctx, key)
         rk[j], rk[j + 1], rk[j + 2], rk[j + 3] = K[0], K[1], K[2], K[3]
     end
 
-    ctx.rk = rk
+    return rk
 end
 
-local function SM4_Update_block(ctx, block, enc)
+local function SMS4_Update_block(rk, _in, _out, enc)
     local X = ffi_new("uint32_t[4]")
-    X[0] = uint32(block, 0 + 1)
-    X[1] = uint32(block, 4 + 1)
-    X[2] = uint32(block, 8 + 1)
-    X[3] = uint32(block, 12 + 1)
+    X[0] = get32(_in, 0)
+    X[1] = get32(_in, 4)
+    X[2] = get32(_in, 8)
+    X[3] = get32(_in, 12)
 
     for i = 0, 8 - 1, 1 do
         local j = 4 * i
-        X[0] = F(X[0], X[1], X[2], X[3], ctx.rk[enc and j + 0 or 31 - j])
-        X[1] = F(X[1], X[2], X[3], X[0], ctx.rk[enc and j + 1 or 30 - j])
-        X[2] = F(X[2], X[3], X[0], X[1], ctx.rk[enc and j + 2 or 29 - j])
-        X[3] = F(X[3], X[0], X[1], X[2], ctx.rk[enc and j + 3 or 28 - j])
+        X[0] = F(X[0], X[1], X[2], X[3], rk[enc and j + 0 or 31 - j])
+        X[1] = F(X[1], X[2], X[3], X[0], rk[enc and j + 1 or 30 - j])
+        X[2] = F(X[2], X[3], X[0], X[1], rk[enc and j + 2 or 29 - j])
+        X[3] = F(X[3], X[0], X[1], X[2], rk[enc and j + 3 or 28 - j])
     end
     X[0], X[1], X[2], X[3] = X[3], X[2], X[1], X[0]
 
-    local dst = new_tab(0, 16)
-    byte4(X[0], dst, 0 + 1)
-    byte4(X[1], dst, 4 + 1)
-    byte4(X[2], dst, 8 + 1)
-    byte4(X[3], dst, 12 + 1)
-    return dst
+    put32(X[0], _out, 0)
+    put32(X[1], _out, 4)
+    put32(X[2], _out, 8)
+    put32(X[3], _out, 12)
 end
 
-local function SM4_Encrypt(ctx, data, len)
+local function sms4_encrypt(_in, _out, key)
+    local sms4key = ffi_cast("sms4_key_t*", key)
+    SMS4_Update_block(sms4key.rk, _in, _out, true)
+end
 
+local function sms4_decrypt(_in, _out, key)
+    local sms4key = ffi_cast("sms4_key_t*", key)
+    SMS4_Update_block(sms4key.rk, _in, _out, false)
+end
+
+local function sms4_wrap_init_key(ctx, key, iv, enc)
+    local cipher_data = C.EVP_CIPHER_CTX_get_cipher_data(ctx)
+    local wctx = ffi_cast("EVP_SMS4_WRAP_CTX*", cipher_data)
+    if iv == ffi_null and key == ffi_null then
+        return 1
+    end
+
+    if key ~= ffi_null then
+        wctx.ks.ks.rk = SMS4_Init(key)
+        if iv == ffi_null then
+            wctx.iv = ffi_null
+        end
+    end
+
+    if iv ~= ffi_null then
+        ffi_copy(C.EVP_CIPHER_CTX_iv_noconst(ctx), iv, C.EVP_CIPHER_CTX_iv_length(ctx))
+        wctx.iv = C.EVP_CIPHER_CTX_iv_noconst(ctx)
+    end
+
+    return 1
+end
+
+local function sms4_wrap_cipher(ctx, _out, _in, inlen)
+    local cipher_data = C.EVP_CIPHER_CTX_get_cipher_data(ctx)
+    local wctx = ffi_cast("EVP_SMS4_WRAP_CTX*", cipher_data)
+
+    -- SMS4 wrap with padding has IV length of 4, without padding 8
+    local pad = C.EVP_CIPHER_CTX_iv_length(ctx) == 4
+
+    -- No final operation so always return zero length
+    if _in == ffi_null then
+        return 0
+    end
+    -- Input length must always be non-zero
+    if tonumber(inlen) == 0 then
+        return -1
+    end
+    -- If decrypting need at least 16 bytes and multiple of 8
+    if C.EVP_CIPHER_CTX_encrypting(ctx) == 0 and (tonumber(inlen) < 16 or band(tonumber(inlen), 0x7) ~= 0) then
+        return -1
+    end
+
+    -- If not padding input must be multiple of 8
+    if not pad and band(tonumber(inlen), 0x7) ~= 0 then
+        return -1
+    end
+
+    if _out == ffi_null then
+        if C.EVP_CIPHER_CTX_encrypting(ctx) == 1 then
+            -- If padding round up to multiple of 8
+            if pad then
+                inlen = (tonumber(inlen) + 7) / 8 * 8;
+            end
+            --  8 byte prefix
+            return inlen + 8
+        else
+            -- If not padding output will be exactly 8 bytes smaller than
+            -- input. If padding it will be at least 8 bytes smaller but we
+            -- don't know how much.
+            return inlen - 8
+        end
+    end
+
+    local rv = 0
+    local ks = ffi_new("sms4_key_t[1]", { wctx.ks.ks })
+    if pad then
+        if C.EVP_CIPHER_CTX_encrypting(ctx) == 1 then
+            rv = C.CRYPTO_128_wrap_pad(ks, wctx.iv, _out, _in, inlen, ffi_cast("block128_f", sms4_encrypt))
+        else
+            rv = C.CRYPTO_128_unwrap_pad(ks, wctx.iv, _out, _in, inlen, ffi_cast("block128_f", sms4_decrypt))
+        end
+    else
+        if C.EVP_CIPHER_CTX_encrypting(ctx) == 1 then
+            rv = C.CRYPTO_128_wrap(ks, wctx.iv, _out, _in, inlen, ffi_cast("block128_f", sms4_encrypt))
+        else
+            rv = C.CRYPTO_128_unwrap(ks, wctx.iv, _out, _in, inlen, ffi_cast("block128_f", sms4_decrypt))
+        end
+    end
+
+    return tonumber(rv) ~= 0 and tonumber(rv) or -1;
+end
+
+local function sms4_ctrl(ctx, type, arg, ptr)
+    C.EVP_CIPHER_CTX_set_flags(ctx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW)
+    return 1
+end
+
+function _M.cipher(_cipher)
+    local cipher = ffi_new("EVP_CIPHER[1]")
+    cipher[0].nid = 1161
+    cipher[0].block_size = 8
+    cipher[0].key_len = 16
+    cipher[0].iv_len = 4
+    cipher[0].flags = SMS4_WRAP_FLAGS
+    cipher[0].init = sms4_wrap_init_key
+    cipher[0].do_cipher = sms4_wrap_cipher
+    cipher[0].cleanup = ffi_null
+    cipher[0].ctx_size = ffi.sizeof("EVP_SMS4_WRAP_CTX")
+    cipher[0].set_asn1_parameters = ffi_null
+    cipher[0].get_asn1_parameters = ffi_null
+    cipher[0].ctrl = sms4_ctrl
+    cipher[0].app_data = ffi_null
+
+    local _cipher = _cipher or "cbc"
+    return { size = 128, cipher = _cipher, method = cipher }
 end
 
 function _M.new(self, key)
-    local ctx = new_tab(0, 1)
-    SM4_Init(ctx, key)
-
-    return setmetatable({ _ctx = ctx }, mt)
+    local rk = SMS4_Init(ffi_new("const unsigned char[16]", key))
+    return setmetatable({ rk = rk }, mt)
 end
 
-function _M.encrypt_block(self, s)
-    return SM4_Update_block(self._ctx, s, true)
+function _M.encrypt(self, block)
+    local _in = ffi_new("const unsigned char[16]", block)
+    local _out = ffi_new("unsigned char[16]")
+
+    SMS4_Update_block(self.rk, _in, _out, true)
+
+    return ffi_str(_out)
 end
 
-function _M.decrypt_block(self, s)
-    return SM4_Update_block(self._ctx, s, false)
+function _M.decrypt(self, block)
+    local _in = ffi_new("const unsigned char[16]", block)
+    local _out = ffi_new("unsigned char[16]")
+
+    SMS4_Update_block(self.rk, _in, _out, false)
+
+    return ffi_str(_out)
 end
 
 return _M
