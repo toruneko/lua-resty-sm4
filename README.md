@@ -1,7 +1,7 @@
 Name
 =============
 
-lua-resty-sm4 - SM4 functions for LuaJIT
+lua-resty-sm4 - SM4 block cipher algorithm for LuaJIT
 
 Status
 ======

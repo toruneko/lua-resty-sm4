@@ -18,7 +18,7 @@ run_tests();
 
 __DATA__
 
-=== TEST 1: SM4 cipher
+=== TEST 1: SM4 evp cipher
 --- http_config eval: $::HttpConfig
 --- config
     location = /t {
